@@ -1,0 +1,18 @@
+[build]
+  command = "echo 'No build required'"
+  publish = "."
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[headers]]
+  for = "/.netlify/blobs/*"
+  [headers.values]
+    "Cache-Control" = "public, max-age=31536000, immutable"
+    "Access-Control-Allow-Origin" = "*" # Замените на ваш домен для безопасности
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
