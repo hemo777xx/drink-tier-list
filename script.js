@@ -47,36 +47,36 @@ class TierListApp {
         await this.loadImages();
     }
 
-    // --- Работа с хранилищем ---
+       // --- Работа с хранилищем (через Netlify Functions) ---
 
     async loadImages() {
         try {
-            // В Netlify Functions мы будем использовать /api/list
-            // Но так как мы на клиенте используем ESM, мы можем напрямую вызвать store.list
-            const list = await this.store.list();
-            const images = [];
-            
-            for (const key of list.blobs) {
-                if (key === '_tier_data') continue;
-                const url = this.store.getURL(key);
-                images.push({ key, url: `${url}?v=${Date.now()}`, tier: 'library', order: 0 });
-            }
+            const response = await fetch('/api/list');
+            const data = await response.json();
+            const images = data.items.map(item => ({
+                key: item.key,
+                url: item.url,
+                tier: 'library',
+                order: 0
+            }));
 
             // Загружаем сохраненные позиции
             try {
-                const tierDataStr = await this.store.get('_tier_data');
-                if (tierDataStr) {
-                    const tierData = JSON.parse(tierDataStr);
-                    tierData.items.forEach(item => {
-                        const img = images.find(i => i.key === item.key);
-                        if (img) {
-                            img.tier = item.tier;
-                            img.order = item.order;
-                        }
-                    });
-                }
-            } catch (e) {
-                console.log('No tier data found');
+                const tierRes = await fetch('/api/list'); // Можно использовать тот же список, если бэк возвращает tier
+                // Если нет, оставляем library
+            } catch (e) {}
+
+            // Загружаем из localStorage для позиций
+            const local = localStorage.getItem('drinkTierList');
+            if (local) {
+                const localData = JSON.parse(local);
+                localData.forEach(localImg => {
+                    const img = images.find(i => i.key === localImg.key);
+                    if (img) {
+                        img.tier = localImg.tier;
+                        img.order = localImg.order;
+                    }
+                });
             }
 
             this.state.images = images;
@@ -88,7 +88,7 @@ class TierListApp {
         }
     }
 
-    async loadFromLocalStorage() {
+    loadFromLocalStorage() {
         const local = localStorage.getItem('drinkTierList');
         if (local) {
             this.state.images = JSON.parse(local);
@@ -110,24 +110,22 @@ class TierListApp {
         this.updateProgress(0);
 
         try {
-            // Сжатие и конвертация в WebP
             const webpBlob = await this.compressImage(file);
-            const key = `drink_${Date.now()}_${Math.random().toString(36).substring(7)}.webp`;
-            
-            // Читаем как ArrayBuffer для Netlify Blobs
-            const buffer = await webpBlob.arrayBuffer();
-            
-            // Симуляция прогресса
             this.updateProgress(50);
             
-            // Загрузка в Blob Storage
-            await this.store.set(key, buffer, {
-                metadata: { contentType: 'image/webp', uploadedAt: new Date().toISOString() }
+            const formData = new FormData();
+            formData.append('image', webpBlob, `drink_${Date.now()}.webp`);
+
+            const response = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData
             });
+
+            if (!response.ok) throw new Error('Upload failed');
             
-            const url = this.store.getURL(key);
+            const data = await response.json();
             
-            this.state.images.push({ key, url: `${url}?v=${Date.now()}`, tier: 'library', order: 0 });
+            this.state.images.push({ key: data.key, url: data.url, tier: 'library', order: 0 });
             this.render();
             this.saveState();
             this.showToast('Фото загружено!', 'success');
@@ -141,7 +139,12 @@ class TierListApp {
 
     async deleteImage(key) {
         try {
-            await this.store.delete(key);
+            await fetch('/api/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key })
+            });
+            
             this.state.images = this.state.images.filter(img => img.key !== key);
             this.render();
             this.saveState();
@@ -153,21 +156,26 @@ class TierListApp {
     }
 
     async saveState() {
-        // Debounce сохранения позиций
         clearTimeout(this.saveTimeout);
         this.saveTimeout = setTimeout(async () => {
+            // Сохраняем позиции локально (быстро)
+            localStorage.setItem('drinkTierList', JSON.stringify(this.state.images));
+            
+            // Отправляем на сервер
             const tierData = {
                 items: this.state.images.map(img => ({ key: img.key, tier: img.tier, order: img.order }))
             };
             try {
-                await this.store.set('_tier_data', JSON.stringify(tierData));
-                localStorage.setItem('drinkTierList', JSON.stringify(this.state.images));
+                await fetch('/api/update-tier', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(tierData)
+                });
             } catch (error) {
                 console.error('Save state error:', error);
             }
         }, 1000);
     }
-
     // --- Утилиты ---
 
     async compressImage(file) {
