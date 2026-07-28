@@ -1,4 +1,4 @@
-import { getStore } from 'https://cdn.jsdelivr.net/npm/@netlify/blobs/+esm';
+// script.js — полностью рабочий клиентский код (без прямого доступа к Blob Storage)
 
 class TierListApp {
     constructor() {
@@ -12,9 +12,6 @@ class TierListApp {
                 { id: 'D', name: 'Trash', color: 'var(--tier-d)' }
             ]
         };
-        
-        // Инициализация Netlify Blob Store
-        this.store = getStore({ name: 'drink-tier-list' });
         
         // DOM элементы
         this.dom = {
@@ -47,43 +44,25 @@ class TierListApp {
         await this.loadImages();
     }
 
-       // --- Работа с хранилищем (через Netlify Functions) ---
+    // --- Работа с хранилищем через API ---
 
     async loadImages() {
         try {
             const response = await fetch('/api/list');
+            if (!response.ok) throw new Error('Failed to load images');
             const data = await response.json();
-            const images = data.items.map(item => ({
+            
+            // Ожидаем, что данные приходят в формате { items: [{ key, url, tier, order, metadata }] }
+            this.state.images = data.items.map(item => ({
                 key: item.key,
-                url: item.url,
-                tier: 'library',
-                order: 0
+                url: item.url + '?v=' + Date.now(), // добавляем версию для обновления кеша
+                tier: item.tier || 'library',
+                order: item.order || 0
             }));
-
-            // Загружаем сохраненные позиции
-            try {
-                const tierRes = await fetch('/api/list'); // Можно использовать тот же список, если бэк возвращает tier
-                // Если нет, оставляем library
-            } catch (e) {}
-
-            // Загружаем из localStorage для позиций
-            const local = localStorage.getItem('drinkTierList');
-            if (local) {
-                const localData = JSON.parse(local);
-                localData.forEach(localImg => {
-                    const img = images.find(i => i.key === localImg.key);
-                    if (img) {
-                        img.tier = localImg.tier;
-                        img.order = localImg.order;
-                    }
-                });
-            }
-
-            this.state.images = images;
             this.render();
         } catch (error) {
             console.error('Load error:', error);
-            this.showToast('Не удалось загрузить фото. Используется локальное хранилище.', 'error');
+            this.showToast('Не удалось загрузить фото с сервера. Использую локальный кеш.', 'error');
             this.loadFromLocalStorage();
         }
     }
@@ -91,8 +70,16 @@ class TierListApp {
     loadFromLocalStorage() {
         const local = localStorage.getItem('drinkTierList');
         if (local) {
-            this.state.images = JSON.parse(local);
-            this.render();
+            try {
+                const data = JSON.parse(local);
+                if (data.length > 0) {
+                    this.state.images = data;
+                    this.render();
+                    this.showToast('Загружено из локального кеша', 'info');
+                }
+            } catch (e) {
+                console.error('Parse error:', e);
+            }
         }
     }
 
@@ -110,40 +97,58 @@ class TierListApp {
         this.updateProgress(0);
 
         try {
+            // Сжатие и конвертация в WebP
             const webpBlob = await this.compressImage(file);
-            this.updateProgress(50);
+            this.updateProgress(30);
             
+            // Отправка на сервер через FormData
             const formData = new FormData();
-            formData.append('image', webpBlob, `drink_${Date.now()}.webp`);
-
+            formData.append('image', webpBlob, 'drink.webp');
+            
+            this.updateProgress(60);
+            
             const response = await fetch('/api/upload', {
                 method: 'POST',
                 body: formData
             });
-
-            if (!response.ok) throw new Error('Upload failed');
+            
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(errText || 'Upload failed');
+            }
             
             const data = await response.json();
+            this.updateProgress(90);
             
-            this.state.images.push({ key: data.key, url: data.url, tier: 'library', order: 0 });
+            // Добавляем новое фото в состояние
+            this.state.images.push({
+                key: data.key,
+                url: data.url + '?v=' + Date.now(),
+                tier: 'library',
+                order: 0
+            });
+            
             this.render();
             this.saveState();
             this.showToast('Фото загружено!', 'success');
         } catch (error) {
             console.error('Upload error:', error);
-            this.showToast('Ошибка загрузки.', 'error');
+            this.showToast('Ошибка загрузки: ' + error.message, 'error');
         } finally {
             this.dom.progressContainer.hidden = true;
+            this.dom.fileInput.value = ''; // сбрасываем input
         }
     }
 
     async deleteImage(key) {
         try {
-            await fetch('/api/delete', {
-                method: 'POST',
+            const response = await fetch('/api/delete', {
+                method: 'DELETE',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ key })
             });
+            
+            if (!response.ok) throw new Error('Delete failed');
             
             this.state.images = this.state.images.filter(img => img.key !== key);
             this.render();
@@ -156,26 +161,33 @@ class TierListApp {
     }
 
     async saveState() {
+        // Debounce сохранения позиций
         clearTimeout(this.saveTimeout);
         this.saveTimeout = setTimeout(async () => {
-            // Сохраняем позиции локально (быстро)
-            localStorage.setItem('drinkTierList', JSON.stringify(this.state.images));
-            
-            // Отправляем на сервер
             const tierData = {
-                items: this.state.images.map(img => ({ key: img.key, tier: img.tier, order: img.order }))
+                items: this.state.images.map(img => ({
+                    key: img.key,
+                    tier: img.tier,
+                    order: img.order
+                }))
             };
             try {
+                // Сохраняем на сервер
                 await fetch('/api/update-tier', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(tierData)
                 });
+                // И в локальное хранилище как резерв
+                localStorage.setItem('drinkTierList', JSON.stringify(this.state.images));
             } catch (error) {
                 console.error('Save state error:', error);
+                // Если сервер недоступен, сохраняем хотя бы в localStorage
+                localStorage.setItem('drinkTierList', JSON.stringify(this.state.images));
             }
         }, 1000);
     }
+
     // --- Утилиты ---
 
     async compressImage(file) {
@@ -241,7 +253,10 @@ class TierListApp {
             this.dom.emptyState.style.display = 'none';
         }
 
-        this.state.images.forEach(img => {
+        // Сортируем изображения в каждом тире по порядку (если нужно)
+        const sortedImages = [...this.state.images].sort((a, b) => (a.order || 0) - (b.order || 0));
+
+        sortedImages.forEach(img => {
             const card = this.createCard(img);
             if (img.tier === 'library') {
                 this.dom.libraryGrid.appendChild(card);
@@ -281,11 +296,11 @@ class TierListApp {
 
     handleDragStart(e, key) {
         this.draggedItem = key;
-        e.target.classList.add('dragging');
+        e.target.closest('.drink-card')?.classList.add('dragging');
     }
 
     handleDragEnd(e) {
-        e.target.classList.remove('dragging');
+        e.target.closest('.drink-card')?.classList.remove('dragging');
         this.draggedItem = null;
     }
 
@@ -301,7 +316,9 @@ class TierListApp {
                 e.preventDefault();
                 zone.classList.remove('drag-over');
                 const tier = zone.dataset.tier || 'library';
-                this.moveToTier(this.draggedItem, tier);
+                if (this.draggedItem) {
+                    this.moveToTier(this.draggedItem, tier);
+                }
             });
         });
     }
@@ -313,7 +330,7 @@ class TierListApp {
         this.touchTimer = setTimeout(() => {
             this.dom.modal.classList.add('active');
             this.renderModalTiers();
-        }, 500); // Long press
+        }, 500); // Долгое нажатие
     }
 
     handleTouchMove(e) {
@@ -344,11 +361,11 @@ class TierListApp {
             this.dom.modalTiers.appendChild(btn);
         });
         
-        // Кнопка для библиотеки
+        // Кнопка для библиотеки (исправлены кавычки!)
         const libBtn = document.createElement('button');
         libBtn.className = 'modal__tier-btn';
         libBtn.style.backgroundColor = 'var(--color-surface-alt)';
-        libBtn.innerHTML = '<i class='fas fa-images'></i>';
+        libBtn.innerHTML = '<i class="fas fa-images"></i>'; // ← ИСПРАВЛЕННАЯ СТРОКА
         libBtn.onclick = () => {
             this.moveToTier(this.draggedItem, 'library');
             this.dom.modal.classList.remove('active');
@@ -362,6 +379,7 @@ class TierListApp {
         const img = this.state.images.find(i => i.key === key);
         if (img) {
             img.tier = tier;
+            // Пересчитываем порядок (можно добавить логику, но пока просто сохраняем)
             this.render();
             this.saveState();
         }
@@ -369,12 +387,23 @@ class TierListApp {
 
     clearAll() {
         if (confirm('Удалить все фото и сбросить тир-лист?')) {
+            // Удаляем все фото через API
             this.state.images.forEach(async (img) => {
-                if (!img.key.startsWith('local_')) await this.store.delete(img.key);
+                if (!img.key.startsWith('local_')) {
+                    try {
+                        await fetch('/api/delete', {
+                            method: 'DELETE',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ key: img.key })
+                        });
+                    } catch (e) {
+                        console.warn('Could not delete', img.key, e);
+                    }
+                }
             });
-            this.store.delete('_tier_data');
-            localStorage.removeItem('drinkTierList');
+            // Сбрасываем состояние
             this.state.images = [];
+            localStorage.removeItem('drinkTierList');
             this.render();
             this.showToast('Всё очищено!', 'success');
         }
@@ -392,13 +421,20 @@ class TierListApp {
     }
 
     exportToPNG() {
-        this.showToast('Генерация изображения...', 'success');
-        html2canvas(this.dom.tierList, { backgroundColor: null }).then(canvas => {
-            const link = document.createElement('a');
-            link.download = 'drink-tier-list.png';
-            link.href = canvas.toDataURL();
-            link.click();
-        });
+        // Убедимся, что библиотека html2canvas подключена
+        if (typeof html2canvas !== 'undefined') {
+            html2canvas(this.dom.tierList, { backgroundColor: null }).then(canvas => {
+                const link = document.createElement('a');
+                link.download = 'drink-tier-list.png';
+                link.href = canvas.toDataURL();
+                link.click();
+            }).catch(err => {
+                console.error(err);
+                this.showToast('Ошибка экспорта.', 'error');
+            });
+        } else {
+            this.showToast('Библиотека html2canvas не загружена.', 'error');
+        }
     }
 
     async share() {
@@ -409,7 +445,11 @@ class TierListApp {
                     text: 'Посмотри мой тир-лист напитков!',
                     url: window.location.href
                 });
-            } catch (err) {}
+            } catch (err) {
+                if (err.name !== 'AbortError') {
+                    console.error(err);
+                }
+            }
         } else {
             this.showToast('Web Share не поддерживается.', 'error');
         }
@@ -430,6 +470,7 @@ class TierListApp {
         this.dom.uploadZone.addEventListener('click', () => this.dom.fileInput.click());
         this.dom.fileInput.addEventListener('change', (e) => {
             Array.from(e.target.files).forEach(file => this.uploadImage(file));
+            e.target.value = ''; // сброс
         });
 
         this.dom.uploadZone.addEventListener('dragover', (e) => {
@@ -454,6 +495,8 @@ class TierListApp {
     }
 }
 
-// Инициализация
-const app = new TierListApp();
-app.init();
+// Инициализация при загрузке DOM
+document.addEventListener('DOMContentLoaded', () => {
+    const app = new TierListApp();
+    app.init();
+});
