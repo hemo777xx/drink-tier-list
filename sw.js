@@ -6,13 +6,30 @@ self.addEventListener('install', (e) => {
 });
 
 self.addEventListener('fetch', (e) => {
+    const url = new URL(e.request.url);
+    
+    // Игнорируем запросы к расширениям Chrome и другим сторонним ресурсам
+    if (url.protocol === 'chrome-extension:' || url.hostname.includes('chrome-extension')) {
+        e.respondWith(fetch(e.request));
+        return;
+    }
+    
     e.respondWith(
-        caches.match(e.request).then(res => res || fetch(e.request).then(response => {
-            return caches.open(CACHE_NAME).then(cache => {
-                if(e.request.method === 'GET') cache.put(e.request, response.clone());
+        caches.match(e.request).then(res => {
+            if (res) return res;
+            
+            return fetch(e.request).then(response => {
+                // Кешируем только GET-запросы к нашему сайту
+                if (e.request.method === 'GET' && 
+                    (url.hostname === 'drink-tier-list.netlify.app' || url.hostname === 'localhost')) {
+                    return caches.open(CACHE_NAME).then(cache => {
+                        cache.put(e.request, response.clone());
+                        return response;
+                    });
+                }
                 return response;
             });
-        }))
+        })
     );
 });
 
