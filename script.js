@@ -44,6 +44,25 @@ class TierListApp {
         await this.loadImages();
     }
 
+    // --- Утилита для нормализации URL ---
+    normalizeUrl(url) {
+        if (!url) return '';
+        // Если URL уже полный (начинается с http:// или https://)
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+            return url;
+        }
+        // Если URL начинается с // (протокол-относительный)
+        if (url.startsWith('//')) {
+            return window.location.protocol + url;
+        }
+        // Если URL начинается с / (относительный путь)
+        if (url.startsWith('/')) {
+            return window.location.origin + url;
+        }
+        // Если URL относительный без слеша
+        return window.location.origin + '/' + url;
+    }
+
     // --- Работа с хранилищем через API ---
 
     async loadImages() {
@@ -52,10 +71,10 @@ class TierListApp {
             if (!response.ok) throw new Error('Failed to load images');
             const data = await response.json();
             
-            // Ожидаем, что данные приходят в формате { items: [{ key, url, tier, order, metadata }] }
+            // Нормализуем URL для каждого изображения
             this.state.images = data.items.map(item => ({
                 key: item.key,
-                url: item.url + '?v=' + Date.now(), // добавляем версию для обновления кеша
+                url: this.normalizeUrl(item.url) + '?v=' + Date.now(),
                 tier: item.tier || 'library',
                 order: item.order || 0
             }));
@@ -120,10 +139,13 @@ class TierListApp {
             const data = await response.json();
             this.updateProgress(90);
             
+            // Нормализуем URL перед сохранением
+            const imageUrl = this.normalizeUrl(data.url);
+            
             // Добавляем новое фото в состояние
             this.state.images.push({
                 key: data.key,
-                url: data.url + '?v=' + Date.now(),
+                url: imageUrl + '?v=' + Date.now(),
                 tier: 'library',
                 order: 0
             });
@@ -289,6 +311,15 @@ class TierListApp {
             this.deleteImage(img.key);
         });
 
+        // Добавляем обработчик ошибки загрузки изображения
+        const imgElement = card.querySelector('img');
+        imgElement.addEventListener('error', () => {
+            console.warn('Failed to load image:', img.url);
+            imgElement.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 24 24" fill="none" stroke="%23666" stroke-width="2"%3E%3Crect x="3" y="3" width="18" height="18" rx="2"/%3E%3Ccircle cx="8.5" cy="8.5" r="1.5"/%3E%3Cpath d="M21 15l-5-5-5 5-4-4-3 3"/%3E%3C/svg%3E';
+            imgElement.style.objectFit = 'contain';
+            imgElement.style.background = '#1a1a2e';
+        });
+
         return card;
     }
 
@@ -361,11 +392,11 @@ class TierListApp {
             this.dom.modalTiers.appendChild(btn);
         });
         
-        // Кнопка для библиотеки (исправлены кавычки!)
+        // Кнопка для библиотеки
         const libBtn = document.createElement('button');
         libBtn.className = 'modal__tier-btn';
         libBtn.style.backgroundColor = 'var(--color-surface-alt)';
-        libBtn.innerHTML = '<i class="fas fa-images"></i>'; // ← ИСПРАВЛЕННАЯ СТРОКА
+        libBtn.innerHTML = '<i class="fas fa-images"></i>';
         libBtn.onclick = () => {
             this.moveToTier(this.draggedItem, 'library');
             this.dom.modal.classList.remove('active');
@@ -379,7 +410,6 @@ class TierListApp {
         const img = this.state.images.find(i => i.key === key);
         if (img) {
             img.tier = tier;
-            // Пересчитываем порядок (можно добавить логику, но пока просто сохраняем)
             this.render();
             this.saveState();
         }
@@ -421,7 +451,6 @@ class TierListApp {
     }
 
     exportToPNG() {
-        // Убедимся, что библиотека html2canvas подключена
         if (typeof html2canvas !== 'undefined') {
             html2canvas(this.dom.tierList, { backgroundColor: null }).then(canvas => {
                 const link = document.createElement('a');
@@ -470,7 +499,7 @@ class TierListApp {
         this.dom.uploadZone.addEventListener('click', () => this.dom.fileInput.click());
         this.dom.fileInput.addEventListener('change', (e) => {
             Array.from(e.target.files).forEach(file => this.uploadImage(file));
-            e.target.value = ''; // сброс
+            e.target.value = '';
         });
 
         this.dom.uploadZone.addEventListener('dragover', (e) => {
