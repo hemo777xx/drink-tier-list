@@ -28,19 +28,36 @@ export const handler = async (event) => {
         let fileBuffer = null;
         let filename = null;
 
-        await new Promise((resolve, reject) => {
-            bb.on('file', (name, file, info) => {
-                filename = info.filename;
-                const chunks = [];
-                file.on('data', (data) => chunks.push(data));
-                file.on('end', () => {
-                    fileBuffer = Buffer.concat(chunks);
-                });
-            });
-            bb.on('close', resolve);
-            bb.on('error', reject);
-            bb.end(event.body);
+        // Замените весь блок с await new Promise(...) на это:
+
+await new Promise((resolve, reject) => {
+    bb.on('file', (name, file, info) => {
+        filename = info.filename;
+        const chunks = [];
+        file.on('data', (data) => chunks.push(data));
+        file.on('end', () => {
+            fileBuffer = Buffer.concat(chunks);
         });
+    });
+    bb.on('close', () => {
+        if (!fileBuffer || !filename) {
+            reject(new Error('No file uploaded'));
+            return;
+        }
+        resolve();
+    });
+    bb.on('error', reject);
+    
+    // ВАЖНО: Правильно обрабатываем тело запроса
+    if (event.isBase64Encoded) {
+        // Если тело в base64 (для больших файлов)
+        const buffer = Buffer.from(event.body, 'base64');
+        bb.end(buffer);
+    } else {
+        // Если тело в raw-формате
+        bb.end(event.body);
+    }
+});
 
         if (!fileBuffer || !filename) {
             return {
