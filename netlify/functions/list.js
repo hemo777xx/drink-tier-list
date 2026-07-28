@@ -11,35 +11,46 @@ export const handler = async (event) => {
         // Получаем список всех файлов
         const list = await store.list();
         const items = [];
+        const blobs = list.blobs || [];
 
-        for (const key of list.blobs) {
+        // Загружаем данные о тирах (если есть)
+        let tierMap = {};
+        try {
+            const tierDataStr = await store.get('_tier_data');
+            if (tierDataStr) {
+                const parsed = JSON.parse(tierDataStr);
+                if (parsed.items) {
+                    parsed.items.forEach(item => {
+                        tierMap[item.key] = { tier: item.tier, order: item.order };
+                    });
+                }
+            }
+        } catch (e) {
+            // Нет данных о тирах — просто игнорируем
+            console.log('No tier data found, using defaults');
+        }
+
+        for (const key of blobs) {
             if (key === '_tier_data') continue;
             
             // Получаем метаданные для каждого файла
-            const meta = await store.get(key, { metadata: true });
-            const url = `/.netlify/blobs/${process.env.BLOB_STORE_NAME || 'drink-tier-list'}/${key}`;
-            
-            // Пытаемся получить tier из отдельного хранилища, если есть
-            let tierData = {};
+            let metadata = {};
             try {
-                const tierDataStr = await store.get('_tier_data');
-                if (tierDataStr) {
-                    const parsed = JSON.parse(tierDataStr);
-                    const found = parsed.items.find(item => item.key === key);
-                    if (found) {
-                        tierData = { tier: found.tier, order: found.order };
-                    }
-                }
+                const meta = await store.get(key, { metadata: true });
+                metadata = meta?.metadata || {};
             } catch (e) {
-                // Нет данных о тирах — игнорируем
+                // Если метаданные не доступны — просто игнорируем
             }
+            
+            const url = `/.netlify/blobs/${process.env.BLOB_STORE_NAME || 'drink-tier-list'}/${key}`;
+            const tierInfo = tierMap[key] || { tier: 'library', order: 0 };
 
             items.push({
                 key: key,
                 url: url,
-                tier: tierData.tier || 'library',
-                order: tierData.order || 0,
-                metadata: meta?.metadata || {}
+                tier: tierInfo.tier,
+                order: tierInfo.order || 0,
+                metadata: metadata
             });
         }
 
@@ -51,9 +62,11 @@ export const handler = async (event) => {
 
     } catch (error) {
         console.error('List error:', error);
+        // Возвращаем пустой список, чтобы не ломать клиент
         return {
-            statusCode: 500,
-            body: JSON.stringify({ error: error.message })
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ items: [], error: error.message })
         };
     }
 };
