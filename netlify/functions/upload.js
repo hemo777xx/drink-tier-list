@@ -2,21 +2,18 @@ import { getStore } from '@netlify/blobs';
 import busboy from 'busboy';
 
 export const handler = async (event) => {
-    // Проверяем метод
     if (event.httpMethod !== 'POST') {
         return { statusCode: 405, body: 'Method Not Allowed' };
     }
 
     try {
-        // ЯВНО передаём siteID и token из переменных окружения
         const store = getStore({
             name: process.env.BLOB_STORE_NAME || 'drink-tier-list',
-            siteID: process.env.SITE_ID,      // Автоматически доступна в Netlify
+            siteID: process.env.SITE_ID,
             token: process.env.BLOB_STORE_TOKEN
         });
 
-        // Парсинг multipart/form-data
-        const contentType = event.headers['content-type'] || '';
+        const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
         if (!contentType.includes('multipart/form-data')) {
             return {
                 statusCode: 400,
@@ -24,54 +21,47 @@ export const handler = async (event) => {
             };
         }
 
-        const bb = busboy({ headers: { 'content-type': contentType } });
+        const bb = busboy({ 
+            headers: { 'content-type': contentType },
+            limits: { fileSize: 5 * 1024 * 1024 }
+        });
+        
         let fileBuffer = null;
         let filename = null;
 
-        // Замените весь блок с await new Promise(...) на это:
+        await new Promise((resolve, reject) => {
+            bb.on('file', (name, file, info) => {
+                filename = info.filename;
+                const chunks = [];
+                file.on('data', (data) => chunks.push(data));
+                file.on('end', () => {
+                    fileBuffer = Buffer.concat(chunks);
+                });
+            });
 
-await new Promise((resolve, reject) => {
-    bb.on('file', (name, file, info) => {
-        filename = info.filename;
-        const chunks = [];
-        file.on('data', (data) => chunks.push(data));
-        file.on('end', () => {
-            fileBuffer = Buffer.concat(chunks);
+            bb.on('close', () => {
+                if (!fileBuffer || !filename) {
+                    reject(new Error('No file uploaded'));
+                    return;
+                }
+                resolve();
+            });
+
+            bb.on('error', reject);
+            
+            if (event.isBase64Encoded) {
+                const buffer = Buffer.from(event.body, 'base64');
+                bb.end(buffer);
+            } else {
+                bb.end(event.body);
+            }
         });
-    });
-    bb.on('close', () => {
-        if (!fileBuffer || !filename) {
-            reject(new Error('No file uploaded'));
-            return;
-        }
-        resolve();
-    });
-    bb.on('error', reject);
-    
-    // ВАЖНО: Правильно обрабатываем тело запроса
-    if (event.isBase64Encoded) {
-        // Если тело в base64 (для больших файлов)
-        const buffer = Buffer.from(event.body, 'base64');
-        bb.end(buffer);
-    } else {
-        // Если тело в raw-формате
-        bb.end(event.body);
-    }
-});
 
-        if (!fileBuffer || !filename) {
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'No file uploaded' })
-            };
-        }
-
-        // Генерируем уникальное имя
         const timestamp = Date.now();
         const randomStr = Math.random().toString(36).substring(7);
         const key = `drink_${timestamp}_${randomStr}.webp`;
 
-        // Сохраняем в Blob Storage
+        // СОХРАНЯЕМ ФАЙЛ
         await store.set(key, fileBuffer, {
             metadata: {
                 contentType: 'image/webp',
@@ -80,7 +70,17 @@ await new Promise((resolve, reject) => {
             }
         });
 
-        // Формируем публичный URL
+        // Проверяем, что файл действительно сохранился
+        try {
+            const check = await store.get(key);
+            if (!check) {
+                throw new Error('File not found after save');
+            }
+        } catch (checkError) {
+            console.error('Save verification failed:', checkError);
+            // Продолжаем, но логируем
+        }
+
         const url = `/.netlify/blobs/${process.env.BLOB_STORE_NAME || 'drink-tier-list'}/${key}`;
 
         return {
