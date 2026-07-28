@@ -6,11 +6,17 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
+# ДОБАВЬТЕ ЭТУ СЕКЦИЮ для функции upload
+[functions."upload"]
+  # Увеличиваем лимит до 10 МБ (чуть больше максимального размера файла 5 МБ)
+  [functions."upload".limits]
+    body_size = 10485760
+
 [[headers]]
   for = "/.netlify/blobs/*"
   [headers.values]
     "Cache-Control" = "public, max-age=31536000, immutable"
-    "Access-Control-Allow-Origin" = "*" # Замените на ваш домен для безопасности
+    "Access-Control-Allow-Origin" = "*"
 
 [[redirects]]
   from = "/api/*"
